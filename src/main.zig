@@ -1,6 +1,7 @@
 const std = @import("std");
 const wv_opt_sim = @import("wv_opt_sim");
 const zigimg = @import("zigimg");
+const fasttrig = @import("fasttrig.zig");
 
 const FILE = "./mask.png";
 const GRID_SPACING = 0.1;
@@ -107,7 +108,7 @@ pub fn proccess_mask(mask: []const u8, dist2: f64, size: xy, allocator: std.mem.
     const normalizer = size.f_size * size.f_size;
     while (i < mask.len) : (i += 1) {
         result[i] = try area_num_int(lin_to_flat(i, size), mask, dist2, size, &xcs, &ycs, normalizer);
-        std.debug.print("{}\n", .{i});
+        //std.debug.print("{}\n", .{i});
         xcs = 0;
         ycs = 0;
     }
