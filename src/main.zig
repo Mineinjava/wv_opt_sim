@@ -80,8 +80,7 @@ pub fn subtract_abs(a: u64, b: u64) u64 {
 }
 
 pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, ycs: *f64, normalizer:f64) !f64 {
-    var i: usize = 0;
-    while (i < mask.len) : (i += 1) {
+    for (0..mask.len) |i| {
         if (mask[i] == 0) {
             continue;
         }
