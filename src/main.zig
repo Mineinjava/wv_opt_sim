@@ -4,6 +4,7 @@ const zigimg = @import("zigimg");
 
 const FILE = "./mask.png";
 const GRID_SPACING = 0.1;
+const GRID_SPACING_2: f64 = GRID_SPACING * GRID_SPACING;
 const LIGHT_WAVELENGTH = 550e-6;
 
 const xy = struct { x: usize, y: usize, f_size: f64 };
@@ -16,7 +17,7 @@ pub fn main() !void {
     var image = try zigimg.Image.fromFilePath(allocator, FILE, read_buffer[0..]);
     defer image.deinit(allocator);
 
-    const SIZE = xy{ .x = image.width, .y = image.height, .f_size = @floatFromInt(image.width * image.height)};
+    const SIZE = xy{ .x = image.width, .y = image.height, .f_size = @floatFromInt(image.width * image.height) };
 
     std.debug.print("Found image with size x: {}, y: {}, pixel format {}\n", .{ SIZE.x, SIZE.y, image.pixelFormat() });
 
@@ -54,7 +55,7 @@ pub fn lin_to_flat(i: usize, sz: xy) xy {
     // assumes rows are sequential
     const x = i % sz.x;
     const y = (i - x) / sz.y;
-    return xy{ .x = x, .y = y, .f_size = 0};
+    return xy{ .x = x, .y = y, .f_size = 0 };
 }
 
 pub fn flat_to_lin(p: xy, sz: xy) usize {
@@ -74,20 +75,29 @@ pub fn mean(numbers: []f64) f64 {
     return sum(numbers) / @as(f64, @floatFromInt(numbers.len));
 }
 
-pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, ycs: *f64) !f64 {
+pub fn subtract_abs(a: u64, b: u64) u64 {
+    return if (a > b) a - b else b - a;
+}
+
+pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, ycs: *f64, normalizer:f64) !f64 {
     var i: usize = 0;
     while (i < mask.len) : (i += 1) {
         if (mask[i] == 0) {
             continue;
         }
         const l = lin_to_flat(i, size);
-        const dx: f64 = @as(f64, @floatFromInt(p.x)) - @as(f64, @floatFromInt(l.x));
-        const dy: f64 = @as(f64, @floatFromInt(p.y)) - @as(f64, @floatFromInt(l.y));
-        const distance: f64 = @sqrt(std.math.pow(f64, dx * GRID_SPACING, 2) + std.math.pow(f64, dy * GRID_SPACING, 2) + dist2);
-        xcs.* += @as(f64, @floatFromInt(mask[i])) * @cos(distance);
-        ycs.* += @as(f64, @floatFromInt(mask[i])) * @sin(distance);
+        const dx2: u64 = subtract_abs(p.x, l.x);
+        const dy2: u64 = subtract_abs(p.y, l.y);
+        const planedist: f64 = @floatFromInt(dx2*dx2 + dy2*dy2);
+
+        const distance: f64 = @sqrt(planedist * GRID_SPACING_2 + dist2)/LIGHT_WAVELENGTH;
+
+        const maskValueFloat: f64 = @floatFromInt(mask[i]);
+
+        xcs.* += maskValueFloat * @cos(distance); // range is 0-255
+        ycs.* += maskValueFloat * @sin(distance);
     }
-    return @sqrt(std.math.pow(f64, xcs.*/size.f_size/LIGHT_WAVELENGTH, 2) + std.math.pow(f64, ycs.*/size.f_size/LIGHT_WAVELENGTH, 2));
+    return @sqrt(std.math.pow(f64, xcs.*, 2) + std.math.pow(f64, ycs.*, 2)) / normalizer;
 }
 
 pub fn proccess_mask(mask: []const u8, dist2: f64, size: xy, allocator: std.mem.Allocator) ![]f64 {
@@ -95,8 +105,9 @@ pub fn proccess_mask(mask: []const u8, dist2: f64, size: xy, allocator: std.mem.
     var ycs: f64 = 0;
     var result: []f64 = try allocator.alloc(f64, mask.len);
     var i: usize = 0;
+    const normalizer = size.f_size * size.f_size;
     while (i < mask.len) : (i += 1) {
-        result[i] = try area_num_int(lin_to_flat(i, size), mask, dist2, size, &xcs, &ycs);
+        result[i] = try area_num_int(lin_to_flat(i, size), mask, dist2, size, &xcs, &ycs, normalizer);
         std.debug.print("{}\n", .{i});
         xcs = 0;
         ycs = 0;
