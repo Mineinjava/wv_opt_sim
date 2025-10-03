@@ -82,7 +82,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
@@ -147,6 +146,9 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
+
+    const installAssembly = b.addInstallBinFile(exe.getEmittedAsm(), "app" ++ ".s");
+    b.getInstallStep().dependOn(&installAssembly.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
