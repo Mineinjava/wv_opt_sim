@@ -7,11 +7,18 @@ const FILE = "./mask.png";
 const GRID_SPACING = 0.1;
 const GRID_SPACING_2: f64 = GRID_SPACING * GRID_SPACING;
 const LIGHT_WAVELENGTH = 550e-6;
+const MULTITHREAD = true;
 
 const xy = struct { x: usize, y: usize, f_size: f64 };
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.next(); // filename is useless
+    const distance: f64 = try std.fmt.parseFloat(f64, args.next() orelse "1800");
+    const output: [:0]const u8 = args.next() orelse "./zig_output.png";
 
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
@@ -20,7 +27,7 @@ pub fn main() !void {
 
     const SIZE = xy{ .x = image.width, .y = image.height, .f_size = @floatFromInt(image.width * image.height) };
 
-    std.debug.print("Found image with size x: {}, y: {}, pixel format {}\n", .{ SIZE.x, SIZE.y, image.pixelFormat() });
+    std.debug.print("Found image with size x: {}, y: {}, pixel format {}\nPlate distance {} units, output to {s}\n", .{ SIZE.x, SIZE.y, image.pixelFormat(), distance, output });
 
     try image.convert(allocator, zigimg.PixelFormat.grayscale8);
 
@@ -30,7 +37,7 @@ pub fn main() !void {
     while (i < mask1.len) : (i += 1) {
         mask1[i] = image.pixels.grayscale8[i].value;
     }
-    const result = try proccess_mask(mask1, 20 * 20, SIZE, allocator);
+    const result = try proccess_mask(mask1, distance * distance, SIZE, allocator);
     defer allocator.free(result);
     const postproc = try proc_out_img(result, allocator);
     defer allocator.free(postproc);
@@ -38,7 +45,7 @@ pub fn main() !void {
     defer final.deinit(allocator);
 
     var write_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
-    try final.writeToFilePath(allocator, "./zig_output.png", write_buffer[0..], .{ .png = .{} });
+    try final.writeToFilePath(allocator, output, write_buffer[0..], .{ .png = .{} });
 }
 
 pub fn proc_out_img(n: []f64, allocator: std.mem.Allocator) ![]u8 {
@@ -80,7 +87,11 @@ pub fn subtract_abs(a: u64, b: u64) u64 {
     return if (a > b) a - b else b - a;
 }
 
-pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, ycs: *f64, normalizer:f64) !f64 {
+pub fn rounddiv(x: u64, y: u64) u64 {
+    return (x + y / 2) / y;
+}
+
+pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, ycs: *f64, normalizer: f64) !f64 {
     for (0..mask.len) |i| {
         if (mask[i] == 0) {
             continue;
@@ -88,9 +99,9 @@ pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, yc
         const l = lin_to_flat(i, size);
         const dx2: u64 = subtract_abs(p.x, l.x);
         const dy2: u64 = subtract_abs(p.y, l.y);
-        const planedist: f64 = @floatFromInt(dx2*dx2 + dy2*dy2);
+        const planedist: f64 = @floatFromInt(dx2 * dx2 + dy2 * dy2);
 
-        const distance: f64 = @sqrt(planedist * GRID_SPACING_2 + dist2)/LIGHT_WAVELENGTH;
+        const distance: f64 = @sqrt(planedist * GRID_SPACING_2 + dist2) / LIGHT_WAVELENGTH;
 
         const maskValueFloat: f64 = @floatFromInt(mask[i]);
 
@@ -100,17 +111,48 @@ pub fn area_num_int(p: xy, mask: []const u8, dist2: f64, size: xy, xcs: *f64, yc
     return @sqrt(std.math.pow(f64, xcs.*, 2) + std.math.pow(f64, ycs.*, 2)) / normalizer;
 }
 
-pub fn proccess_mask(mask: []const u8, dist2: f64, size: xy, allocator: std.mem.Allocator) ![]f64 {
+pub fn area_num_int_threadwrapper(mask: []const u8, dist2: f64, size: xy, normalizer: f64, result: []f64, startIndex: u64, count: u64) void {
     var xcs: f64 = 0;
     var ycs: f64 = 0;
-    var result: []f64 = try allocator.alloc(f64, mask.len);
-    var i: usize = 0;
-    const normalizer = size.f_size * size.f_size;
-    while (i < mask.len) : (i += 1) {
+    for (startIndex..count) |i| {
         result[i] = try area_num_int(lin_to_flat(i, size), mask, dist2, size, &xcs, &ycs, normalizer);
-        //std.debug.print("{}\n", .{i});
         xcs = 0;
         ycs = 0;
+    }
+}
+
+pub fn proccess_mask(mask: []const u8, dist2: f64, size: xy, allocator: std.mem.Allocator) ![]f64 {
+    // init stuff
+    var result: []f64 = try allocator.alloc(f64, mask.len);
+    const normalizer = size.f_size * size.f_size;
+    if (MULTITHREAD) {
+        // threading stuff
+        const N = @max(std.Thread.getCpuCount() catch 1, 1);
+        var pool: std.Thread.Pool = undefined;
+        try pool.init(.{
+            .allocator = allocator,
+            .n_jobs = N,
+        });
+        defer pool.deinit();
+
+        var start_index: u64 = 0;
+        var wg: std.Thread.WaitGroup = .{};
+        for (0..N) |i| {
+            const end_index = if (i == N - 1) (mask.len - 1) else start_index + mask.len / N;
+            pool.spawnWg(&wg, area_num_int_threadwrapper, .{ mask, dist2, size, normalizer, result, start_index, end_index });
+            // ... spawn thread/worker here with `work` slice
+            start_index = end_index;
+        }
+        wg.wait();
+    } else {
+        var xcs: f64 = 0;
+        var ycs: f64 = 0;
+        for (0..mask.len) |i| {
+            result[i] = try area_num_int(lin_to_flat(i, size), mask, dist2, size, &xcs, &ycs, normalizer);
+            //std.debug.print("{}\n", .{i});
+            xcs = 0;
+            ycs = 0;
+        }
     }
     return result;
 }
